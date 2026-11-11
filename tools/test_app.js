@@ -125,7 +125,7 @@ function check(name, ok, detail) {
   else { failures++; console.log("  ✗ " + name + (detail !== undefined ? "  — " + JSON.stringify(detail) : "")); }
 }
 
-async function newPage(browser, { width = 390, height = 844, scheme = "light", cfg = FAST, seed = null, mocks = {} } = {}) {
+async function newPage(browser, { width = 390, height = 844, scheme = "light", cfg = FAST, seed = null, mocks = {}, init = null } = {}) {
   const context = await browser.newContext({
     viewport: { width, height }, deviceScaleFactor: 2, colorScheme: scheme,
     serviceWorkers: "block"
@@ -141,6 +141,7 @@ async function newPage(browser, { width = 390, height = 844, scheme = "light", c
       sessionStorage.setItem("seeded", "1");
     }
   }, [cfg, seed]);
+  if (init) await page.addInitScript(init);
   if (cfg) await mockBackends(page, mocks);
   await page.goto(ORIGIN + "/");
   return { page, context, errors };
@@ -294,6 +295,74 @@ async function suite(browser) {
     check("bufferbloat caption is red", await page.getAttribute("#tLoadedSub", "class") === "sub bad");
     check("label is escaped, not executed", !(await page.evaluate(() => window.__xss)) &&
       /<img/.test(await text(page, ".chips")));
+    await context.close();
+  }
+
+
+  console.log("\nShare");
+  {
+    // Stand-in for the OS share sheet: records what it was handed.
+    const init = () => {
+      navigator.canShare = d => !!d;
+      navigator.share = async d => {
+        const files = d.files || [];
+        window.__shared = {
+          text: d.text, title: d.title,
+          files: await Promise.all(files.map(f => new Promise(res => {
+            const fr = new FileReader();
+            fr.onload = () => res({ name: f.name, type: f.type, size: f.size, data: fr.result });
+            fr.readAsDataURL(f);
+          })))
+        };
+      };
+    };
+    const { page, context, errors } = await newPage(browser, { init });
+    check("no share button before any test", !(await page.isVisible("#shareBtn")));
+    await page.click("#go");
+    await page.waitForFunction(() => document.getElementById("gPhase").textContent === "Download");
+    check("no share button mid-test", !(await page.isVisible("#shareBtn")));
+    await page.waitForFunction(() => document.getElementById("stop").hidden, null, { timeout: 30000 });
+    await page.waitForTimeout(500);
+    check("share button after test", await page.isVisible("#shareBtn"));
+    await page.click("#shareBtn");
+    await page.waitForFunction(() => window.__shared, null, { timeout: 5000 });
+    const sh = await page.evaluate(() => window.__shared);
+    const lines = sh.text.split("\n");
+    check("text: heading with date", /^Speed test, /.test(lines[0]), lines[0]);
+    check("text: download and upload", /^Download: \S+ Mbps$/.test(lines[1]) && /^Upload: \S+ Mbps$/.test(lines[2]), lines.slice(1, 3));
+    check("text: ping and under load", lines[3] === "Ping: 12 ms · Under load: 48 ms", lines[3]);
+    check("text: server", lines.includes("Server: M-Lab · Testville, US"));
+    check("text: IP", lines.includes("IP: 203.0.113.9"));
+    check("text: app link", lines[lines.length - 1] === ORIGIN + "/", lines[lines.length - 1]);
+    check("one PNG card attached", sh.files.length === 1 && sh.files[0].type === "image/png" && /^speed-test-\d{4}-\d\d-\d\d-\d{4}\.png$/.test(sh.files[0].name),
+      sh.files.map(f => f.name));
+    if (sh.files[0]) fs.writeFileSync(path.join(__dirname, "shot-card.png"), Buffer.from(sh.files[0].data.split(",")[1], "base64"));
+
+    await page.evaluate(() => { window.__shared = null; });
+    await page.click(".run-row >> nth=0");
+    await page.click("[data-share]");
+    await page.waitForFunction(() => window.__shared, null, { timeout: 5000 });
+    check("history row shares that run", /IP: 203\.0\.113\.9/.test(await page.evaluate(() => window.__shared.text)));
+    check("no console errors", errors.length === 0, errors);
+    await context.close();
+  }
+  {
+    // No share sheet (e.g. Firefox on a Mac): copy the text instead.
+    const init = () => {
+      Object.defineProperty(navigator, "share", { value: undefined, configurable: true });
+      Object.defineProperty(navigator, "clipboard", { value: { writeText: async t => { window.__copied = t; } }, configurable: true });
+    };
+    const seed = { engine: "mlab", labels: ["Office"], label: "Office", history: [
+      { t: Date.now(), engine: "cloudflare", label: "Office", down: 940.5, up: 35.2, ping: 8.4, jitter: 1.2,
+        loadedDown: 30, loadedUp: 210, server: "Cloudflare · IAD", ip: "2001:db8::1" }
+    ] };
+    const { page, context } = await newPage(browser, { init, seed });
+    await page.click("#shareBtn");
+    await page.waitForFunction(() => window.__copied, null, { timeout: 5000 });
+    const t = await page.evaluate(() => window.__copied);
+    check("fallback copies text", /Download: 941 Mbps/.test(t) && /\(Office\)/.test(t), t);
+    check("jitter and worst loaded latency in text", /Ping: 8\.4 ms · Jitter: 1\.2 ms · Under load: 210 ms/.test(t), t);
+    check("button says Copied", (await text(page, "#shareBtn span")) === "Copied");
     await context.close();
   }
 

@@ -290,6 +290,7 @@
   .tile.pending .v { color: var(--dim); }
 
   .meta { color: var(--muted); font-size: 13px; text-align: center; margin: -4px 0 0; min-height: 18px; }
+  .share-row { display: flex; justify-content: center; margin-top: -6px; }
 
   /* ---------- grades ---------- */
 
@@ -380,6 +381,7 @@
   }
   .link-btn.danger { color: var(--poor); }
   .h-foot { display: flex; justify-content: space-between; margin-top: 6px; }
+  .run-actions { display: flex; justify-content: space-between; }
 
   .h-empty { color: var(--muted); font-size: 14px; margin: 12px 0 2px; }
 
@@ -519,6 +521,12 @@
         <div class="tile"><div class="k">Under load</div><div class="v"><span id="tLoaded">—</span><small>ms</small></div><div class="sub" id="tLoadedSub">&nbsp;</div></div>
       </div>
       <p class="meta" id="meta"></p>
+      <div class="share-row">
+        <button type="button" class="pill" id="shareBtn" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M8 7l4-4 4 4"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>
+          <span>Share result</span>
+        </button>
+      </div>
 
       <div class="card grades" id="grades" hidden>
         <h2>What this means</h2>
@@ -1247,13 +1255,177 @@
   }
 
   /* ======================================================================
+     Share — the native share sheet with a text summary and a PNG card,
+     or the text copied to the clipboard where there's no share sheet.
+     The text is written for pasting into an ISP support chat.
+     ====================================================================== */
+
+  var APP_URL = location.origin + location.pathname;
+  var fullFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+  var cardCache = {};
+  var iconImg = null;
+
+  function shareText(r) {
+    var lat = ["Ping: " + fmtMs(r.ping) + " ms"];
+    if (r.jitter != null) lat.push("Jitter: " + fmtMs(r.jitter) + " ms");
+    var load = worstLoaded(r);
+    if (load != null) lat.push("Under load: " + fmtMs(load) + " ms");
+    return [
+      "Speed test, " + fullFmt.format(new Date(r.t)) + (r.label ? " (" + r.label + ")" : ""),
+      "Download: " + fmtMbps(r.down) + " Mbps",
+      "Upload: " + fmtMbps(r.up) + " Mbps",
+      lat.join(" · "),
+      r.server ? "Server: " + r.server : null,
+      r.ip ? "IP: " + r.ip : null,
+      APP_URL
+    ].filter(Boolean).join("\n");
+  }
+
+  function loadIcon() {
+    if (!iconImg) iconImg = new Promise(function (resolve) {
+      var img = new Image();
+      img.onload = function () { resolve(img); };
+      img.onerror = function () { resolve(null); };
+      img.src = "icons/icon-192.png";
+    });
+    return iconImg;
+  }
+
+  // Always dark, whatever the viewer's theme: the card ends up in other
+  // people's chats, so it should look the same everywhere.
+  async function drawCard(r) {
+    var W = 1080, H = 1080, PAD = 80;
+    var c = document.createElement("canvas");
+    c.width = W; c.height = H;
+    var g = c.getContext("2d");
+    var FACE = '-apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif';
+    var TEXT = "#EEF2F8", MUTED = "#94A0B4", DIM = "#5F6B80";
+    function font(w, px) { g.font = w + " " + px + "px " + FACE; }
+    function fit(text, w, px, max) {
+      font(w, px);
+      while (px > 20 && g.measureText(text).width > max) { px -= 4; font(w, px); }
+    }
+
+    var bg = g.createLinearGradient(0, 0, W, H);
+    bg.addColorStop(0, "#141A2A"); bg.addColorStop(1, "#06080D");
+    g.fillStyle = bg; g.fillRect(0, 0, W, H);
+    var glow = g.createRadialGradient(W / 2, -120, 0, W / 2, -120, 760);
+    glow.addColorStop(0, "rgba(56,189,248,.20)"); glow.addColorStop(1, "rgba(56,189,248,0)");
+    g.fillStyle = glow; g.fillRect(0, 0, W, H);
+
+    // Header: mark, name, date, location.
+    var icon = await loadIcon();
+    if (icon) g.drawImage(icon, PAD, PAD, 76, 76);
+    g.textBaseline = "middle";
+    g.fillStyle = TEXT; font("700", 52);
+    g.fillText("Speed", PAD + (icon ? 100 : 0), PAD + 40);
+    g.textAlign = "right";
+    g.fillStyle = MUTED; font("500", 30);
+    g.fillText(fullFmt.format(new Date(r.t)), W - PAD, PAD + (r.label ? 22 : 40));
+    if (r.label) {
+      g.fillStyle = TEXT; fit(r.label, "600", 30, 460);
+      g.fillText(r.label, W - PAD, PAD + 62);
+    }
+    g.textAlign = "left";
+
+    // Download / upload.
+    var colW = (W - PAD * 2 - 40) / 2;
+    [[PAD, "DOWNLOAD", "#38BDF8", r.down], [PAD + colW + 40, "UPLOAD", "#C084FC", r.up]].forEach(function (b) {
+      var x = b[0], v = fmtMbps(b[3]);
+      g.fillStyle = b[2];
+      g.beginPath(); g.arc(x + 12, 330, 12, 0, Math.PI * 2); g.fill();
+      g.textBaseline = "middle"; g.fillStyle = MUTED; font("700", 30);
+      g.fillText(b[1], x + 38, 331);
+      g.textBaseline = "alphabetic"; g.fillStyle = TEXT; fit(v, "700", 170, colW);
+      g.fillText(v, x - 6, 520);
+      g.fillStyle = MUTED; font("600", 36);
+      g.fillText("Mbps", x, 584);
+    });
+
+    g.fillStyle = "#232B3B"; g.fillRect(PAD, 650, W - PAD * 2, 2);
+
+    // Latency row.
+    var sw = (W - PAD * 2) / 3;
+    [["PING", r.ping], ["JITTER", r.jitter], ["UNDER LOAD", worstLoaded(r)]].forEach(function (s, i) {
+      var x = PAD + sw * i, v = fmtMs(s[1]);
+      g.fillStyle = MUTED; font("700", 26);
+      g.fillText(s[0], x, 724);
+      g.fillStyle = TEXT; font("600", 72);
+      g.fillText(v, x, 806);
+      if (s[1] == null) return;
+      var vw = g.measureText(v).width;
+      g.fillStyle = MUTED; font("600", 30);
+      g.fillText("ms", x + vw + 10, 806);
+    });
+
+    // Footer: server, IP, where it came from.
+    var foot = [r.server, r.ip ? "IP " + r.ip : null].filter(Boolean).join("  ·  ");
+    g.fillStyle = MUTED; fit(foot, "500", 28, W - PAD * 2);
+    g.fillText(foot, PAD, 940);
+    g.fillStyle = DIM; font("500", 26);
+    g.fillText(APP_URL.replace(/^https?:\/\//, "").replace(/\/$/, ""), PAD, 990);
+
+    return new Promise(function (resolve, reject) {
+      c.toBlob(function (b) { if (b) resolve(b); else reject(new Error("card")); }, "image/png");
+    });
+  }
+
+  // Render the card ahead of the tap: Safari only lets share() run straight
+  // from a user gesture, so there's no time to draw it after the click.
+  function prepareCard(r) {
+    if (!r || cardCache[r.t]) return;
+    var entry = cardCache[r.t] = { blob: null };
+    drawCard(r).then(function (b) { entry.blob = b; }).catch(function () {});
+  }
+
+  function setShareable(r) {
+    ui.shown = r || null;
+    $("shareBtn").hidden = !r;
+    prepareCard(r);
+  }
+
+  function fileDate(t) {
+    var d = new Date(t);
+    function p(n) { return (n < 10 ? "0" : "") + n; }
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "-" + p(d.getHours()) + p(d.getMinutes());
+  }
+
+  function flash(btn, msg) {
+    var label = btn.querySelector("span") || btn;
+    if (!label.dataset.text) label.dataset.text = label.textContent;
+    label.textContent = msg;
+    clearTimeout(btn._flash);
+    btn._flash = setTimeout(function () { label.textContent = label.dataset.text; }, 1600);
+  }
+
+  async function shareResult(r, btn) {
+    var text = shareText(r);
+    if (navigator.share) {
+      var data = { title: "Speed test result", text: text };
+      var entry = cardCache[r.t];
+      if (entry && entry.blob) {
+        var file = new File([entry.blob], "speed-test-" + fileDate(r.t) + ".png", { type: "image/png" });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) data.files = [file];
+      }
+      try { await navigator.share(data); return; }
+      catch (e) { if (e && e.name === "AbortError") return; }
+    }
+    try { await navigator.clipboard.writeText(text); flash(btn, "Copied"); }
+    catch (e) { flash(btn, "Couldn't share"); }
+  }
+
+  $("shareBtn").addEventListener("click", function () {
+    if (ui.shown) shareResult(ui.shown, this);
+  });
+
+  /* ======================================================================
      Running a test
      ====================================================================== */
 
   var ui = {
     running: false, phase: null, ac: null, phaseT0: 0,
     samples: { download: [], upload: [] },
-    filter: null, showN: 10, open: null, wake: null
+    filter: null, showN: 10, open: null, wake: null, shown: null
   };
   var PHASE_LABEL = { connect: "Connecting", ping: "Ping", download: "Download", upload: "Upload" };
 
@@ -1319,6 +1491,7 @@
     renderTiles(live);
     renderMeta(live);
     $("grades").hidden = true;
+    setShareable(null);
     setRunning(true);
     setStatus("");
     wakeLock(true);
@@ -1348,6 +1521,7 @@
       renderTiles(rec);
       renderMeta(rec);
       renderGrades(rec);
+      setShareable(rec);
       renderHistory();
       setStatus("Done.");
     } catch (e) {
@@ -1465,7 +1639,10 @@
             (r.loadedUp != null ? "↑ " + fmtMs(r.loadedUp) + " ms" : "") + "</dd>" : "") +
           (r.server ? "<dt>Server</dt><dd>" + esc(r.server) + "</dd>" : "") +
           (r.ip ? "<dt>Your IP</dt><dd>" + esc(r.ip) + "</dd>" : "") +
-          '</dl><button type="button" class="link-btn danger" data-del="' + r.t + '">Delete this test</button></div>' : "") +
+          '</dl><div class="run-actions">' +
+            '<button type="button" class="link-btn" data-share="' + r.t + '"><span>Share</span></button>' +
+            '<button type="button" class="link-btn danger" data-del="' + r.t + '">Delete this test</button>' +
+          "</div></div>" : "") +
         "</li>";
     }).join("");
 
@@ -1485,6 +1662,7 @@
       renderMeta(live);
       renderGrades(null);
     }
+    setShareable(r);
   }
 
   $("chips").addEventListener("click", function (e) {
@@ -1495,7 +1673,17 @@
     renderHistory();
   });
 
+  function runAt(t) {
+    return store.history.filter(function (r) { return r.t === t; })[0];
+  }
+
   $("runs").addEventListener("click", function (e) {
+    var sh = e.target.closest("[data-share]");
+    if (sh) {
+      var run = runAt(+sh.dataset.share);
+      if (run) shareResult(run, sh);
+      return;
+    }
     var del = e.target.closest("[data-del]");
     if (del) {
       var t = +del.dataset.del;
@@ -1510,6 +1698,7 @@
     if (!row) return;
     var tt = +row.parentNode.dataset.t;
     ui.open = ui.open === tt ? null : tt;
+    if (ui.open) prepareCard(runAt(ui.open));
     renderHistory();
   });
 
