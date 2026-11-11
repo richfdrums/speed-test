@@ -15,6 +15,9 @@ To install: open the link, then *Share → Add to Home Screen* (iPhone/iPad) or
 - **History** on the device, with download/upload sparklines.
 - **Location labels** ("Office", "Kitchen") so you can compare spots in the house
   and filter history by them.
+- **Share** any result through the system share sheet: a plain-text summary
+  (time, speeds, latency, server, IP — what ISP support asks for) plus a PNG
+  card. Without a share sheet, the text is copied to the clipboard.
 - Opens offline (history still browsable); the test itself needs a connection.
 
 ## Two test backends
